@@ -1,0 +1,47 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Madrid
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: sudo apt-get install -y python3-shapely
+
+      - name: Build
+        run: |
+          mkdir -p dist
+          (cd tools && ./dbgen.py ../dist/live.sqlite $(date -d yesterday +%Y-%m-%d) $(date -d tomorrow +%Y-%m-%d) ../gtfs-archive/data/ && ./binconv.py ../dist/live.sqlite ../dist/live.sched)
+          (cd tools && ./dbgen.py ../dist/plan90.sqlite $(date -d yesterday +%Y-%m-%d) $(date -d "+90 days" +%Y-%m-%d) ../gtfs-archive/data/ && ./binconv.py ../dist/plan90.sqlite ../dist/plan90.sched)
+          (cd tools && ./dbgen.py ../dist/hist.sqlite $(date -d "-1 year" +%Y-%m-%d) $(date +%Y-%m-%d) ../gtfs-archive/data/ && ./binconv.py ../dist/hist.sqlite ../dist/hist.sched)
+
+      - name: Compute tag
+        id: tag
+        run: echo "tag=$(date -u +%Y-%m-%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "${{ steps.tag.outputs.tag }}" \
+            dist/live.sched \
+            dist/plan90.sched \
+            dist/hist.sched
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
