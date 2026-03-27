@@ -1,0 +1,3 @@
+[submodule "gtfs-archive"]
+	path = gtfs-archive
+	url = https://github.com/elguardagujas/gtfs-archive.git
