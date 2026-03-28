@@ -214,6 +214,7 @@ def main():
   parser.add_argument("start",     help="Start date (YYYY-MM-DD, inclusive)")
   parser.add_argument("end",       help="End date (YYYY-MM-DD, exclusive)")
   parser.add_argument("directory", help="Directory containing GTFS zip files")
+  parser.add_argument("--vacuum",  default=False, action="store_true", help="Vacuum the database")
   parser.add_argument("--regmap",  default=os.path.join(os.path.dirname(__file__), "data/esp_reg_map.geojson"), help="Geojson region map")
   args = parser.parse_args()
 
@@ -275,6 +276,9 @@ def main():
     print(f"  {day}  {trip_count:>5} trips")
     day += timedelta(days=1)
 
+  if args.vacuum:
+    conn.execute("VACUUM")
+    conn.commit()
   conn.close()
   print("Done.")
 
