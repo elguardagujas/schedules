@@ -1,7 +1,7 @@
 
 # Loads and parses GTFS files into a python-friendly usable structure.
 
-import zipfile, csv, io
+import zipfile, csv, io, json
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -74,22 +74,25 @@ class GTFSReader:
         self.calendar_dates = defaultdict(dict)
         self._load()
 
-    def _read_csv(self, zf: zipfile.ZipFile, filename: str):
-        names = [n for n in zf.namelist() if n.endswith(filename)]
-        if not names:
-            return []
-        with zf.open(names[0]) as f:
-            reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8-sig"))
-            reader.fieldnames = [h.strip() for h in reader.fieldnames]
-            return [{k.strip(): v.strip() for k, v in row.items()} for row in reader]
+    def _read_file(self, zf: zipfile.ZipFile, name: str):
+        names = zf.namelist()
+        if f"{name}.json" in names:
+            with zf.open(f"{name}.json") as f:
+                return json.load(f)
+        if f"{name}.txt" in names:
+            with zf.open(f"{name}.txt") as f:
+                reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8-sig"))
+                reader.fieldnames = [h.strip() for h in reader.fieldnames]
+                return [{k.strip(): v.strip() for k, v in row.items()} for row in reader]
+        return []
 
     def _load(self):
         with zipfile.ZipFile(self.zip_path) as zf:
-            for a in self._read_csv(zf, "agency.txt"):
+            for a in self._read_file(zf, "agency"):
                 agency_id = a.get("agency_id", "default")
                 self.agency_timezones[agency_id] = a.get("agency_timezone", "UTC")
 
-            for r in self._read_csv(zf, "routes.txt"):
+            for r in self._read_file(zf, "routes"):
                 agency_id = r.get("agency_id", next(iter(self.agency_timezones), "default"))
                 self.routes[r["route_id"]] = {
                     "short_name": r.get("route_short_name", ""),
@@ -97,14 +100,14 @@ class GTFSReader:
                 }
 
             shapes = defaultdict(dict)
-            for r in self._read_csv(zf, "shapes.txt"):
+            for r in self._read_file(zf, "shapes"):
                 shapes[r["shape_id"]][int(r["shape_pt_sequence"])] = {
                     "lat": r["shape_pt_lat"],
                     "lon": r["shape_pt_lon"],
                 }
             self.shapes = {k: [v for _, v in sorted(d.items())] for k, d in shapes.items()}
 
-            raw_stops = self._read_csv(zf, "stops.txt")
+            raw_stops = self._read_file(zf, "stops")
             parent_map = _build_parent_map(raw_stops)
             # only store root stations (those whose root is themselves)
             self.stops = {
@@ -117,7 +120,7 @@ class GTFSReader:
                 if parent_map[r["stop_id"]] == r["stop_id"]
             }
 
-            for t in self._read_csv(zf, "trips.txt"):
+            for t in self._read_file(zf, "trips"):
                 self.trips[t["trip_id"]] = {
                     "service_id": t["service_id"],
                     "route_id": t["route_id"],
@@ -125,7 +128,7 @@ class GTFSReader:
                     "short_name": t.get("trip_short_name", ""),
                 }
 
-            for st in self._read_csv(zf, "stop_times.txt"):
+            for st in self._read_file(zf, "stop_times"):
                 self.stop_times[st["trip_id"]].append({
                     "stop_id": parent_map.get(st["stop_id"], st["stop_id"]),
                     "arrival": st.get("arrival_time", ""),
@@ -133,7 +136,7 @@ class GTFSReader:
                     "sequence": int(st.get("stop_sequence", 0)),
                 })
 
-            for c in self._read_csv(zf, "calendar.txt"):
+            for c in self._read_file(zf, "calendar"):
                 self.calendar[c["service_id"]] = {
                     "days": [c.get(d, "0") for d in
                              ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")],
@@ -141,7 +144,7 @@ class GTFSReader:
                     "end": datetime.strptime(c["end_date"], "%Y%m%d").date(),
                 }
 
-            for cd in self._read_csv(zf, "calendar_dates.txt"):
+            for cd in self._read_file(zf, "calendar_dates"):
                 d = datetime.strptime(cd["date"], "%Y%m%d").date()
                 self.calendar_dates[cd["service_id"]][d] = int(cd["exception_type"])
 

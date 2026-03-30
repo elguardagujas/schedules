@@ -23,9 +23,6 @@ def make_structs(e: str) -> dict:
     "tt_stop":   struct.Struct(f"{e}Ihh"),                        # 8 bytes
   }
 
-def encode_date(table_suffix: str) -> int:
-  return int(table_suffix)  # already YYYYMMDD
-
 
 def pad4(s: bytes) -> bytes:
   rem = len(s) % 4
@@ -81,25 +78,30 @@ def build_timetables(conn: sqlite3.Connection, S: dict) -> tuple[bytes, dict[int
 
 
 def build_trip_days(conn: sqlite3.Connection, S: dict,
-                    tt_offsets: dict[int, int]) -> tuple[bytes, bytes, list[int]]:
-  tables = [r[0] for r in conn.execute(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'trips_%' ORDER BY name"
+                    tt_offsets: dict[int, int],
+                    from_date: int | None, to_date: int | None) -> tuple[bytes, bytes, list[int]]:
+
+  dates = [r[0] for r in conn.execute(
+    "SELECT DISTINCT trip_date FROM trips ORDER BY trip_date"
   )]
 
   day_table = bytearray()
   trip_blob = bytearray()
   day_dates = []
 
-  for table in tables:
-    date_int   = encode_date(table[6:])  # trips_YYYYMMDD -> YYYYMMDD
+  for date_int in dates:
+    if from_date is not None and date_int < from_date:
+      continue
+    if to_date is not None and to_date < date_int:
+      continue
     trip_start = len(trip_blob)
 
     trips = conn.execute(f"""
       SELECT trip_id, trip_short_name, route_short_name,
              origin_id, destination_id, start_time, end_time,
              timetable_id, shape_id
-      FROM "{table}" ORDER BY trip_id ASC
-    """).fetchall()
+      FROM trips WHERE trip_date = ? ORDER BY trip_id ASC
+    """, (date_int,)).fetchall()
 
     for trip_id, trip_sn, route_sn, orig, dest, t0, t1, tt_id, shape_id in trips:
       trip_blob += S["trip"].pack(
@@ -123,6 +125,8 @@ def main():
   parser.add_argument("db",  help="Input SQLite database")
   parser.add_argument("out", help="Output binary file")
   parser.add_argument("--big-endian", action="store_true", help="Use big-endian byte order")
+  parser.add_argument("--from-date", type=int, metavar="YYYYMMDD", help="First date to include (inclusive)")
+  parser.add_argument("--to-date",   type=int, metavar="YYYYMMDD", help="Last date to include (inclusive)")
   args = parser.parse_args()
 
   e = ">" if args.big_endian else "<"
@@ -133,7 +137,7 @@ def main():
   print("Building stations...")  ;  stations_data        = build_stations(conn, S)
   print("Building shapes...")    ;  shapes_data           = build_shapes(conn, S)
   print("Building timetables...");  tt_data, tt_offsets   = build_timetables(conn, S)
-  print("Building trip days...")  ; day_data, trip_data, day_dates = build_trip_days(conn, S, tt_offsets)
+  print("Building trip days...")  ; day_data, trip_data, day_dates = build_trip_days(conn, S, tt_offsets, args.from_date, args.to_date)
 
   n_timetables = conn.execute("SELECT COUNT(*) FROM timetable_stops").fetchone()[0]
   n_stations   = conn.execute("SELECT COUNT(*) FROM stations").fetchone()[0]

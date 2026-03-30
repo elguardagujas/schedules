@@ -71,13 +71,10 @@ def init_schema(conn: sqlite3.Connection):
       num_stops    INTEGER NOT NULL,
       data         BLOB NOT NULL
     ) STRICT;
-  """)
 
-def ensure_day_table(conn: sqlite3.Connection, day: date) -> str:
-  table = f"trips_{day.strftime('%Y%m%d')}"
-  conn.execute(f"""
-    CREATE TABLE IF NOT EXISTS "{table}" (
-      trip_id           TEXT PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS trips (
+      trip_id           TEXT NOT NULL,
+      trip_date         INTEGER NOT NULL,
       trip_short_name   TEXT,
       route_id          TEXT,
       route_short_name  TEXT,
@@ -86,10 +83,10 @@ def ensure_day_table(conn: sqlite3.Connection, day: date) -> str:
       start_time        INTEGER,
       end_time          INTEGER,
       timetable_id      INTEGER NOT NULL,
-      shape_id          INTEGER NOT NULL DEFAULT 0
-    ) STRICT
+      shape_id          INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (trip_id, trip_date)
+    ) STRICT;
   """)
-  return table
 
 
 # --- station merging ---
@@ -192,15 +189,15 @@ def insert_timetable(conn: sqlite3.Connection, timetable_id: int, num_stops: int
     (timetable_id, num_stops, blob)
   )
 
-def insert_trip(conn: sqlite3.Connection, table: str, trip: TripTimetable,
+def insert_trip(conn: sqlite3.Connection, day: date, trip: TripTimetable,
                 timetable_id: int, shape_id: int):
-  conn.execute(f"""
-    INSERT INTO "{table}"
-      (trip_id, trip_short_name, route_id, route_short_name,
+  conn.execute("""
+    INSERT INTO trips
+      (trip_id, trip_date, trip_short_name, route_id, route_short_name,
        origin_id, destination_id, start_time, end_time, timetable_id, shape_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   """, (
-    trip.trip_id, trip.trip_short_name, trip.route_id, trip.route_short_name,
+    trip.trip_id, int(day.strftime('%Y%m%d')), trip.trip_short_name, trip.route_id, trip.route_short_name,
     stop_id_to_int(trip.origin_id), stop_id_to_int(trip.destination_id),
     trip.start_time, trip.end_time, timetable_id, shape_id
   ))
@@ -214,8 +211,8 @@ def main():
   parser.add_argument("start",     help="Start date (YYYY-MM-DD, inclusive)")
   parser.add_argument("end",       help="End date (YYYY-MM-DD, exclusive)")
   parser.add_argument("directory", help="Directory containing GTFS zip files")
-  parser.add_argument("--vacuum",  default=False, action="store_true", help="Vacuum the database")
   parser.add_argument("--regmap",  default=os.path.join(os.path.dirname(__file__), "data/esp_reg_map.geojson"), help="Geojson region map")
+  parser.add_argument("--vacuum",  default=False, action="store_true", help="Vacuum the database")
   args = parser.parse_args()
 
   if os.path.isfile(args.regmap):
@@ -250,7 +247,6 @@ def main():
   day = start
   while day < end:
     trip_count = 0
-    table = ensure_day_table(conn, day)
 
     for provider in providers:
       available, reloaded = provider.ensure_loaded(day)
@@ -269,7 +265,7 @@ def main():
           seen_timetables[h] = tid
           insert_timetable(conn, tid, len(trip.stops), blob)
         shape_id = provider.shape_id_map.get(trip.shape_id, 0) if trip.shape_id else 0
-        insert_trip(conn, table, trip, seen_timetables[h], shape_id)
+        insert_trip(conn, day, trip, seen_timetables[h], shape_id)
         trip_count += 1
 
     conn.commit()
@@ -284,4 +280,3 @@ def main():
 
 if __name__ == "__main__":
   main()
-
