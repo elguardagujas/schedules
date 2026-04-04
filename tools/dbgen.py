@@ -2,7 +2,8 @@
 
 import argparse, bisect, hashlib, itertools, re, sqlite3, struct, json, os
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 import shapely.geometry
 
@@ -10,7 +11,7 @@ from gtfs_timetable import GTFSReader, TripTimetable
 
 STOP_STRUCT  = struct.Struct("<Ihh")
 SHAPE_STRUCT = struct.Struct("<ii")
-FILENAME_RE  = re.compile(r"^(.+)_(\d{4}-\d{2}-\d{2})_\d{2}-\d{2}\.zip$")
+FILENAME_RE  = re.compile(r"^(.+)_(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})\.zip$")
 
 STOP_ID_RULES: list[tuple[re.Pattern, callable]] = [
   (re.compile(r"^(\d+)$"), lambda m: int(m.group(1))),
@@ -147,20 +148,20 @@ def merge_shapes(conn: sqlite3.Connection, reader: GTFSReader,
 @dataclass
 class ProviderState:
   name:         str
-  entries:      list[tuple[date, Path]]   # sorted by date ascending
+  entries:      list[tuple[datetime, Path]]   # sorted by date ascending
   loaded_path:  Path | None               = None
   reader:       GTFSReader | None         = None
   known_shapes: dict[str, int]            = field(default_factory=dict)
   shape_id_map: dict[str, int]            = field(default_factory=dict)
 
-  def pick_path(self, day: date) -> Path | None:
-    dates = [e[0] for e in self.entries]
-    i = bisect.bisect_right(dates, day) - 1
-    return self.entries[i][1] if i >= 0 else None
+  def pick_path(self, day: date, cutoff: datetime) -> Path | None:
+    # keep files whose schedule date <= day AND were published before the cutoff
+    valid = [(dt, p) for dt, p in self.entries if dt.date() <= day and dt < cutoff]
+    return valid[-1][1] if valid else None  # latest qualifying file
 
-  def ensure_loaded(self, day: date) -> tuple[bool, bool]:
+  def ensure_loaded(self, day: date, cutoff: datetime) -> tuple[bool, bool]:
     """Returns (available, reloaded)."""
-    path = self.pick_path(day)
+    path = self.pick_path(day, cutoff)
     if path is None:
       return False, False
     if path != self.loaded_path:
@@ -171,13 +172,14 @@ class ProviderState:
     return True, False
 
 def scan_providers(directory: Path) -> list[ProviderState]:
-  groups: dict[str, list[tuple[date, Path]]] = {}
+  groups: dict[str, list[tuple[datetime, Path]]] = {}
   for path in sorted(directory.glob("*.zip")):
     m = FILENAME_RE.match(path.name)
     if not m:
       continue
     basename, date_str = m.group(1), m.group(2)
-    groups.setdefault(basename, []).append((date.fromisoformat(date_str), path))
+    pub_dt = datetime(*map(int, date_str.split("-")), int(m.group(3)), int(m.group(4)), tzinfo=timezone.utc)
+    groups.setdefault(basename, []).append((pub_dt, path))
   return [ProviderState(name=name, entries=sorted(entries)) for name, entries in groups.items()]
 
 
@@ -213,6 +215,7 @@ def main():
   parser.add_argument("directory", help="Directory containing GTFS zip files")
   parser.add_argument("--regmap",  default=os.path.join(os.path.dirname(__file__), "data/esp_reg_map.geojson"), help="Geojson region map")
   parser.add_argument("--vacuum",  default=False, action="store_true", help="Vacuum the database")
+  parser.add_argument("--cutoff", default="04:00 Europe/Madrid", help="Don't use a file for day X if published after HH:MM <tz> on day X (default: '04:00 Europe/Madrid')")
   args = parser.parse_args()
 
   if os.path.isfile(args.regmap):
@@ -224,6 +227,10 @@ def main():
   end   = date.fromisoformat(args.end)
   if end <= start:
     raise ValueError(f"End date {end} must be after start date {start}")
+
+  cutoff_time_str, cutoff_tz_str = args.cutoff.rsplit(" ", 1)
+  cutoff_hh, cutoff_mm = map(int, cutoff_time_str.split(":"))
+  cutoff_tz = ZoneInfo(cutoff_tz_str)
 
   providers = scan_providers(Path(args.directory))
   if not providers:
@@ -247,9 +254,11 @@ def main():
   day = start
   while day < end:
     trip_count = 0
+    local_cutoff = datetime(day.year, day.month, day.day, cutoff_hh, cutoff_mm, tzinfo=cutoff_tz)
+    utc_cutoff   = local_cutoff.astimezone(timezone.utc)
 
     for provider in providers:
-      available, reloaded = provider.ensure_loaded(day)
+      available, reloaded = provider.ensure_loaded(day, utc_cutoff)
       if not available:
         continue
       if reloaded:
