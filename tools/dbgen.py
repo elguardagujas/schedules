@@ -214,6 +214,7 @@ def main():
   parser.add_argument("end",       help="End date (YYYY-MM-DD, exclusive)")
   parser.add_argument("directory", help="Directory containing GTFS zip files")
   parser.add_argument("--regmap",  default=os.path.join(os.path.dirname(__file__), "data/esp_reg_map.geojson"), help="Geojson region map")
+  parser.add_argument("--station-dump", type=str, help="Output station list in a JSON file")
   parser.add_argument("--vacuum",  default=False, action="store_true", help="Vacuum the database")
   parser.add_argument("--cutoff", default="04:00 Europe/Madrid", help="Don't use a file for day X if published after HH:MM <tz> on day X (default: '04:00 Europe/Madrid')")
   args = parser.parse_args()
@@ -280,6 +281,14 @@ def main():
     conn.commit()
     print(f"  {day}  {trip_count:>5} trips")
     day += timedelta(days=1)
+
+  if args.station_dump:
+    dump = {}
+    r = conn.execute("SELECT stop_id, stop_name, stop_lat, stop_lon, stop_region FROM stations")
+    for sid, sname, slat, slon, sreg in r.fetchall():
+      dump[sid] = {"name": sname, "latitude": slat, "longitude": slon, "region": sreg}
+    with open(args.station_dump, "w") as ofd:
+      json.dump(dump, ofd, indent=2)
 
   if args.vacuum:
     conn.execute("VACUUM")
