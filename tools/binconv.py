@@ -67,10 +67,12 @@ def build_shapes(conn: sqlite3.Connection, S: dict) -> bytes:
 
 TT_STOP_SRC = struct.Struct("<Ihh")  # SQLite storage is always LE
 
-def build_timetables(conn: sqlite3.Connection, S: dict) -> tuple[bytes, dict[int, int]]:
+def build_timetables(conn: sqlite3.Connection, S: dict, needed: set) -> tuple[bytes, dict[int, int]]:
   out = bytearray()
   offsets: dict[int, int] = {}
   for tt_id, data in conn.execute("SELECT timetable_id, data FROM timetable_stops ORDER BY timetable_id"):
+    if tt_id not in needed:
+      continue
     offsets[tt_id] = len(out)
     out += S["tt_hdr"].pack(len(data) // TT_STOP_SRC.size)
     out += transcode_blob(data, TT_STOP_SRC, S["tt_stop"])
@@ -79,10 +81,10 @@ def build_timetables(conn: sqlite3.Connection, S: dict) -> tuple[bytes, dict[int
 
 def build_trip_days(conn: sqlite3.Connection, S: dict,
                     tt_offsets: dict[int, int],
-                    from_date: int | None, to_date: int | None) -> tuple[bytes, bytes, list[int]]:
+                    wfilter: str) -> tuple[bytes, bytes, list[int]]:
 
   dates = [r[0] for r in conn.execute(
-    "SELECT DISTINCT trip_date FROM trips ORDER BY trip_date"
+    "SELECT DISTINCT trip_date FROM trips " + wfilter + " ORDER BY trip_date"
   )]
 
   day_table = bytearray()
@@ -90,10 +92,6 @@ def build_trip_days(conn: sqlite3.Connection, S: dict,
   day_dates = []
 
   for date_int in dates:
-    if from_date is not None and date_int < from_date:
-      continue
-    if to_date is not None and to_date < date_int:
-      continue
     trip_start = len(trip_blob)
 
     trips = conn.execute(f"""
@@ -134,12 +132,20 @@ def main():
 
   conn = sqlite3.connect(args.db)
 
-  print("Building stations...")  ;  stations_data        = build_stations(conn, S)
-  print("Building shapes...")    ;  shapes_data           = build_shapes(conn, S)
-  print("Building timetables...");  tt_data, tt_offsets   = build_timetables(conn, S)
-  print("Building trip days...")  ; day_data, trip_data, day_dates = build_trip_days(conn, S, tt_offsets, args.from_date, args.to_date)
+  wfilter = ' WHERE 1==1 '
+  if args.from_date:
+    wfilter += ' AND trip_date >= %d' % args.from_date
+  if args.to_date:
+    wfilter += ' AND trip_date <= %d' % args.to_date
 
-  n_timetables = conn.execute("SELECT COUNT(*) FROM timetable_stops").fetchone()[0]
+  needed_tt = {r[0] for r in conn.execute(f"SELECT DISTINCT timetable_id FROM trips" + wfilter)}
+
+  print("Building stations...")  ;  stations_data         = build_stations(conn, S)
+  print("Building shapes...")    ;  shapes_data           = build_shapes(conn, S)
+  print("Building timetables...");  tt_data, tt_offsets   = build_timetables(conn, S, needed_tt)
+  print("Building trip days...")  ; day_data, trip_data, day_dates = build_trip_days(conn, S, tt_offsets, wfilter)
+
+  n_timetables = len(needed_tt)
   n_stations   = conn.execute("SELECT COUNT(*) FROM stations").fetchone()[0]
   n_shapes     = conn.execute("SELECT COUNT(*) FROM shapes").fetchone()[0]
   conn.close()
