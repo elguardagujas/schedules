@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse, bisect, hashlib, itertools, re, sqlite3, struct, json, os
+import argparse, bisect, hashlib, itertools, re, sqlite3, struct, json, os, glob
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -17,11 +17,12 @@ STOP_ID_RULES: list[tuple[re.Pattern, callable]] = [
   (re.compile(r"^(\d+)$"), lambda m: int(m.group(1))),
 ]
 
-def coords_to_region(regmap, lat, lon):
-  pt = shapely.geometry.Point(lon, lat)
-  for feature in regmap["features"]:
-    if shapely.geometry.shape(feature["geometry"]).contains(pt):
-      return feature["properties"]["acom_name"]
+def coords_to_region(regmaps, lat, lon):
+  for regmap in regmaps:
+    pt = shapely.geometry.Point(lon, lat)
+    for feature in regmap["features"]:
+      if shapely.geometry.shape(feature["geometry"]).contains(pt):
+        return feature["properties"]["name"]
 
 def stop_id_to_int(stop_id: str) -> int:
   for pattern, fn in STOP_ID_RULES:
@@ -109,7 +110,7 @@ def best_name(a: str, b: str) -> str:
   score_b += (1 if uppercase_count(b) < uppercase_count(a) else 0)
   return b if score_b > score_a else a
 
-def merge_stations(conn: sqlite3.Connection, stops, known, regmap):
+def merge_stations(conn: sqlite3.Connection, stops, known, regmaps):
   for stop_id, stop_info in stops.items():
     iid = stop_id_to_int(stop_id)
     if iid in known:
@@ -124,7 +125,7 @@ def merge_stations(conn: sqlite3.Connection, stops, known, regmap):
       else:
         slat = int(stop_info["pos"][0] * 1e7)
         slon = int(stop_info["pos"][1] * 1e7)
-        sreg = coords_to_region(regmap, stop_info["pos"][0], stop_info["pos"][1])
+        sreg = coords_to_region(regmaps, stop_info["pos"][0], stop_info["pos"][1])
         conn.execute("INSERT INTO stations (stop_id, stop_name, stop_lat, stop_lon, stop_region) "
                      "VALUES (?, ?, ?, ?, ?)", (iid, stop_info["name"], slat, slon, sreg))
 
@@ -213,16 +214,18 @@ def main():
   parser.add_argument("start",     help="Start date (YYYY-MM-DD, inclusive)")
   parser.add_argument("end",       help="End date (YYYY-MM-DD, exclusive)")
   parser.add_argument("directory", help="Directory containing GTFS zip files")
-  parser.add_argument("--regmap",  default=os.path.join(os.path.dirname(__file__), "data/esp_reg_map.geojson"), help="Geojson region map")
+  parser.add_argument("--regmap",  default=os.path.join(os.path.dirname(__file__), "data/*.geojson"), help="Geojson region map glob")
   parser.add_argument("--station-dump", type=str, help="Output station list in a JSON file")
   parser.add_argument("--vacuum",  default=False, action="store_true", help="Vacuum the database")
   parser.add_argument("--cutoff", default="04:00 Europe/Madrid", help="Don't use a file for day X if published after HH:MM <tz> on day X (default: '04:00 Europe/Madrid')")
   args = parser.parse_args()
 
-  if os.path.isfile(args.regmap):
-    regmap = json.load(open(args.regmap))
+  fmaps = sorted(glob.glob(args.regmap))
+  if fmaps:
+    print("Loading", ",".join(fmaps))
+    fmaps = [json.load(open(x)) for x in fmaps]
   else:
-    print("No regmap file could be loaded")
+    print("No regmap file could be loaded:", args.regmap)
 
   start = date.fromisoformat(args.start)
   end   = date.fromisoformat(args.end)
@@ -264,7 +267,7 @@ def main():
         continue
       if reloaded:
         provider.shape_id_map = merge_shapes(conn, provider.reader, provider.known_shapes, next_shape_id)
-        merge_stations(conn, provider.reader.get_stops(), known_stations, regmap)
+        merge_stations(conn, provider.reader.get_stops(), known_stations, fmaps)
         conn.commit()
 
       for trip in provider.reader.get_timetable(day):
