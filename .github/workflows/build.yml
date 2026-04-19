@@ -34,7 +34,7 @@ jobs:
 
       - name: Compute tag
         id: tag
-        run: echo "tag=$(date -u +%Y-%m-%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(date -u +%Y-%m-%d_%H-%M)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Create release
         run: |
