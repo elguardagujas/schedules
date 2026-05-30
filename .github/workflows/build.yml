@@ -27,7 +27,7 @@ jobs:
       - name: Build
         run: |
           mkdir -p dist
-          (cd tools && ./dbgen.py --station-dump ../dist/stations.json --vacuum ../dist/all.sqlite $(date -d "-1 year" +%Y-%m-%d) $(date -d "+90 days" +%Y-%m-%d) ../gtfs-static/data/)
+          (cd tools && ./dbgen.py --station-dump ../dist/stations.json --vacuum ../dist/all.sqlite $(date -d "-1 year" +%Y-%m-%d) $(date -d "+90 days" +%Y-%m-%d) ../renfe-gtfs-json/data/)
           (cd tools && ./binconv.py --from-date $(date -d yesterday +%Y%m%d) --to-date $(date -d tomorrow +%Y%m%d) ../dist/all.sqlite ../dist/live.sched)
           (cd tools && ./binconv.py --from-date $(date -d yesterday +%Y%m%d) --to-date $(date -d "+90 days" +%Y%m%d) ../dist/all.sqlite ../dist/plan90.sched)
           (cd tools && ./binconv.py --from-date $(date -d "-1 year" +%Y%m%d) --to-date $(date +%Y%m%d) ../dist/all.sqlite ../dist/hist.sched)
