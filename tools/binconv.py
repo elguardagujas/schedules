@@ -6,16 +6,17 @@
 import argparse, sqlite3, hashlib, struct
 
 MAGIC   = b"\x58\x55\x58\x55"
-VERSION = (1, 0)
+VERSION = (2, 0)
 
 def align4(n: int) -> int:
   return (n + 3) & ~3
 
 def make_structs(e: str) -> dict:
   return {
-    "header":    struct.Struct(f"{e}4s HH II HH II IIIIIII Q"),   # 64 bytes
+    "header":    struct.Struct(f"{e}4s HH II HH II IIIIIIIII Q"), # 72 bytes
     "trip_day":  struct.Struct(f"{e}IIII"),                       # 16 bytes
-    "trip":      struct.Struct(f"{e}III hh 32s H 14s 8s"),        # 72 bytes
+    "trip":      struct.Struct(f"{e}II"),                         # 8 bytes: tmpl offset, trip_id string offset
+    "trip_tmpl": struct.Struct(f"{e}III hh H"),                   # 18 bytes + route_sn\0 trip_sn\0, padded to 4
     "station":   struct.Struct(f"{e}Iii"),                        # 12 bytes
     "shape_hdr": struct.Struct(f"{e}II"),                         # 8 bytes
     "shape_pt":  struct.Struct(f"{e}ii"),                         # 8 bytes
@@ -29,8 +30,18 @@ def pad4(s: bytes) -> bytes:
   return s + b"\x00" * (4 - rem) if rem else s
 
 
-def bstr(s: str | None, n: int) -> bytes:
-  return (s or "").encode("utf-8")[:n].ljust(n, b"\x00")
+class StringPool:
+  """Deduplicated pool of NUL-terminated UTF-8 strings, referenced by byte offset."""
+  def __init__(self):
+    self.data = bytearray(b"\x00")   # offset 0 is the empty string
+    self.offs = {"": 0}
+
+  def add(self, s: str | None) -> int:
+    s = s or ""
+    if s not in self.offs:
+      self.offs[s] = len(self.data)
+      self.data += s.encode("utf-8") + b"\x00"
+    return self.offs[s]
 
 
 def build_stations(conn: sqlite3.Connection, S: dict) -> bytes:
@@ -81,7 +92,17 @@ def build_timetables(conn: sqlite3.Connection, S: dict, needed: set) -> tuple[by
 
 def build_trip_days(conn: sqlite3.Connection, S: dict,
                     tt_offsets: dict[int, int],
-                    wfilter: str) -> tuple[bytes, bytes, list[int]]:
+                    wfilter: str) -> tuple[bytes, bytes, list[int], bytes, bytes]:
+
+  pool = StringPool()                   # trip_ids
+  tmpl_blob = bytearray()               # deduplicated trip templates (all fields but trip_id)
+  tmpl_offs: dict[bytes, int] = {}
+
+  def add_tmpl(t: bytes) -> int:
+    if t not in tmpl_offs:
+      tmpl_offs[t] = len(tmpl_blob)
+      tmpl_blob.extend(t)
+    return tmpl_offs[t]
 
   dates = [r[0] for r in conn.execute(
     "SELECT DISTINCT trip_date FROM trips " + wfilter + " ORDER BY trip_date"
@@ -102,20 +123,14 @@ def build_trip_days(conn: sqlite3.Connection, S: dict,
     """, (date_int,)).fetchall()
 
     for trip_id, trip_sn, route_sn, orig, dest, t0, t1, tt_id, shape_id in trips:
-      trip_blob += S["trip"].pack(
-        orig, dest,
-        tt_offsets.get(tt_id, 0),
-        t0 or 0, t1 or 0,
-        bstr(trip_id, 32),
-        shape_id or 0,
-        bstr(route_sn, 14),
-        bstr(trip_sn, 8),
-      )
+      tmpl = S["trip_tmpl"].pack(orig, dest, tt_offsets.get(tt_id, 0), t0 or 0, t1 or 0, shape_id or 0)
+      tmpl += (route_sn or "").encode("utf-8") + b"\x00" + (trip_sn or "").encode("utf-8") + b"\x00"
+      trip_blob += S["trip"].pack(add_tmpl(pad4(tmpl)), pool.add(trip_id))
 
     day_table += S["trip_day"].pack(date_int, len(trips), trip_start, 0)
     day_dates.append(date_int)
 
-  return bytes(day_table), bytes(trip_blob), day_dates
+  return bytes(day_table), bytes(trip_blob), day_dates, bytes(tmpl_blob), bytes(pool.data)
 
 
 def main():
@@ -143,34 +158,36 @@ def main():
   print("Building stations...")  ;  stations_data         = build_stations(conn, S)
   print("Building shapes...")    ;  shapes_data           = build_shapes(conn, S)
   print("Building timetables...");  tt_data, tt_offsets   = build_timetables(conn, S, needed_tt)
-  print("Building trip days...")  ; day_data, trip_data, day_dates = build_trip_days(conn, S, tt_offsets, wfilter)
+  print("Building trip days...")  ; day_data, trip_data, day_dates, tmpl_data, str_data = build_trip_days(conn, S, tt_offsets, wfilter)
 
   n_timetables = len(needed_tt)
   n_stations   = conn.execute("SELECT COUNT(*) FROM stations").fetchone()[0]
   n_shapes     = conn.execute("SELECT COUNT(*) FROM shapes").fetchone()[0]
   conn.close()
 
-  HEADER_SIZE  = 64
+  HEADER_SIZE  = 72
   off_stations = 0
   off_shapes   = off_stations + len(stations_data)
   off_tt       = off_shapes   + len(shapes_data)
   off_days     = off_tt       + len(tt_data)
   off_trips    = off_days     + len(day_data)
+  off_tmpls    = off_trips    + len(trip_data)
+  off_strings  = off_tmpls    + len(tmpl_data)   # runs to end of file
 
   header = S["header"].pack(
     MAGIC, VERSION[0], VERSION[1],
     day_dates[0] if day_dates else 0, day_dates[-1] if day_dates else 0,
     n_stations, n_shapes, n_timetables, len(day_dates),
     off_stations, off_shapes, off_tt, len(tt_data),
-    off_days, off_trips, len(trip_data), 0,
+    off_days, off_trips, len(trip_data), off_tmpls, off_strings, 0,
   )
   assert len(header) == HEADER_SIZE
 
-  total = HEADER_SIZE + len(stations_data) + len(shapes_data) + len(tt_data) + len(day_data) + len(trip_data)
-  pload = header + stations_data + shapes_data + tt_data + day_data + trip_data
+  total = HEADER_SIZE + len(stations_data) + len(shapes_data) + len(tt_data) + len(day_data) + len(trip_data) + len(tmpl_data) + len(str_data)
+  pload = header + stations_data + shapes_data + tt_data + day_data + trip_data + tmpl_data + str_data
   # Calculate CRC and patch the payload
   crc64 = hashlib.sha256(pload).digest()[:8]
-  pload = pload[:56] + crc64 + pload[64:]
+  pload = pload[:HEADER_SIZE - 8] + crc64 + pload[HEADER_SIZE:]
 
   with open(args.out, "wb") as f:
     f.write(pload)
